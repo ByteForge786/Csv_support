@@ -1,3 +1,115 @@
+def process_ddl_in_batches(ddl, samples=None):
+    """Process DDL analysis in batches with labeled sections"""
+    # Constants
+    BATCH_SIZE = 30
+    
+    # Extract column definitions from DDL
+    import re
+    # Find all column definitions between parentheses
+    matches = re.search(r'\((.*?)\);', ddl, re.DOTALL)
+    if not matches:
+        raise ValueError("Could not extract column definitions from DDL")
+        
+    # Split the column definitions and clean them
+    column_defs = matches.group(1).split(',\n')
+    column_defs = [col.strip() for col in column_defs if col.strip()]
+    
+    # Extract column names
+    columns = []
+    for col_def in column_defs:
+        col_name = col_def.split()[0].strip('"')
+        columns.append((col_name, col_def))
+
+    # Initialize results
+    all_results = []
+    batch_ddls = []
+    
+    # Process in batches
+    for i in range(0, len(columns), BATCH_SIZE):
+        batch_columns = columns[i:i + BATCH_SIZE]
+        
+        # Create a mini DDL for this batch
+        batch_ddl = f"Batch {i//BATCH_SIZE + 1} - CREATE TABLE batch_{i//BATCH_SIZE + 1} (\n"
+        batch_ddl += ',\n'.join([col_def for _, col_def in batch_columns])
+        batch_ddl += "\n);"
+        batch_ddls.append(batch_ddl)
+        
+        # Extract just the column names for analysis
+        batch_names = [col_name for col_name, _ in batch_columns]
+        
+        # Create analysis prompt for this batch
+        batch_prompt = f"""For each column name below, provide a clear, concise explanation of what it represents in a database context.
+        Format the response as a JSON with column names as keys and explanations as values.
+        
+        Column names with their definitions:
+        {', '.join(batch_names)}"""
+        
+        with st.spinner(f'Analyzing columns {i+1}-{min(i+BATCH_SIZE, len(columns))} of {len(columns)}...'):
+            # Get descriptions for this batch
+            descriptions_json = get_llm_response(batch_prompt)
+            batch_analysis = eval(descriptions_json)
+            
+            # Create classification prompts for this batch
+            batch_classification_prompts = [
+                create_classification_prompt(col, explanation) 
+                for col, explanation in batch_analysis.items()
+            ]
+            
+            # Get sensitivity predictions for this batch
+            batch_predictions = classify_sensitivity(batch_classification_prompts)
+            
+            # Transform predictions
+            batch_transformed = [
+                "Confidential Information" if pred == "Non-person data" else pred 
+                for pred in batch_predictions
+            ]
+            
+            # Add batch results
+            batch_results = [
+                {
+                    "Column Name": col,
+                    "Explanation": explanation,
+                    "Data Sensitivity": sensitivity,
+                    "Batch": f"Batch {i//BATCH_SIZE + 1}"
+                }
+                for (col, explanation), sensitivity in zip(batch_analysis.items(), batch_transformed)
+            ]
+            all_results.extend(batch_results)
+    
+    return pd.DataFrame(all_results), batch_ddls
+
+# Modify the main function's analysis section
+if not st.session_state.analysis_complete:
+    if st.button("🔍 Analyze Structure"):
+        with st.spinner("Analyzing structure and predicting sensitivity..."):
+            # Check for existing analysis first
+            existing_analysis = load_existing_feedback(selected_schema, selected_object)
+            
+            if existing_analysis is not None:
+                st.session_state.analysis_df = existing_analysis
+            else:
+                # Get DDL and process in batches
+                ddl, samples = get_ddl_and_samples(st.session_state.current_schema, 
+                                                 st.session_state.current_object, 
+                                                 st.session_state.current_object_type)
+                
+                # Process DDL in batches
+                analysis_df, batch_ddls = process_ddl_in_batches(ddl, samples)
+                st.session_state.analysis_df = analysis_df
+                st.session_state.batch_ddls = batch_ddls  # Store batch DDLs in session
+
+            st.session_state.analysis_complete = True
+
+# Display DDL in batches
+if st.session_state.analysis_complete and hasattr(st.session_state, 'batch_ddls'):
+    st.subheader("📝 DDL Statements by Batch")
+    for i, batch_ddl in enumerate(st.session_state.batch_ddls, 1):
+        with st.expander(f"Batch {i} Definition", expanded=True):
+            st.code(batch_ddl, language='sql')
+
+
+
+
 def is_allowed_user(username):
     """Check if user is allowed to see CSV upload option"""
     return 'gowdas' in username.lower()
