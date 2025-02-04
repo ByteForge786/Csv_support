@@ -408,6 +408,7 @@ def main():
                 st.session_state.analysis_type = analysis_type
                 # Reset states when switching
                 if analysis_type == "Database Object":
+                    st.session_state.csv_file = None
                     st.session_state.csv_processed = False
                 else:
                     st.session_state.current_schema = None
@@ -458,7 +459,7 @@ def main():
                 # Get DDL and samples
                 ddl, samples = get_ddl_and_samples(st.session_state.current_schema, 
                                                  st.session_state.current_object, 
-                                                 st.session_state.current_object_type)
+                add regex here for extraction of create statements from.views ddl                                st.session_state.current_object_type)
                 
                 # Display DDL
                 st.subheader("📝 DDL Statement")
@@ -527,5 +528,7 @@ def main():
                 logger.error(f"Analysis error: {str(e)}")
 
 if __name__ == "__main__":
-    main().csv_file = None
-                    st.session_state
+    main()
+    
+   
+                    
