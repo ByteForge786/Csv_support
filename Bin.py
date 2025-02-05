@@ -10,13 +10,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
+
+def split_ddl_into_batches(ddl: str, batch_size: int = 5, include_tags: bool = True) -> List[str]:
     """
     Split DDL into batches while preserving CREATE statement structure and column attributes
     
     Args:
         ddl (str): The complete DDL statement
         batch_size (int): Number of columns per batch (default 5)
+        include_tags (bool): Whether to include TAG clauses in output (default True)
         
     Returns:
         List[str]: List of DDL statements, each containing a batch of numbered columns
@@ -59,6 +61,11 @@ def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
                 # If we have a previous column, add it to our list
                 if current_column:
                     columns.append('\n    '.join(current_column))
+                
+                # Remove tags if include_tags is False
+                if not include_tags and 'WITH TAG' in line:
+                    line = re.sub(r'\s+WITH\s+TAG\s*\([^)]+\)', '', line)
+                
                 current_column = [line]
                 
         # Add the last column if exists
@@ -100,8 +107,8 @@ def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
 def test_ddl_splitter():
     """Test the DDL splitter with various cases"""
     
-    # Test case 1: Hybrid mix of column formats
-    test_case_1 = """
+    # Test case with mixed column formats
+    test_ddl = """
     create or replace view HYBRID_TEST_VIEW(
         SIMPLE_COLUMN,
         TYPED_COLUMN VARCHAR(100),
@@ -122,43 +129,29 @@ def test_ddl_splitter():
         primary key (SIMPLE_COLUMN)
     );"""
     
-    # Test case 2: CREATE TABLE with mixed formats
-    test_case_2 = """
-    create or replace TABLE MIXED_FORMAT_TABLE (
-        ID NUMBER(38,0) NOT NULL,
-        -- Dummy Sample: SAMPLE_VALUE
-        NAME VARCHAR(200),
-        -- Dummy Samples: 2024-07-04, 2024-07-05
-        DATE_COLUMN DATE WITH TAG (DATA.SENSITIVITY='HIGH'),
-        SIMPLE_COL,
-        -- Dummy Samples: 100.5, 200.5
-        AMOUNT NUMBER(10,2),
-        STATUS VARCHAR(50) WITH TAG (DATA.TYPE='STATUS'),
-        -- Dummy Sample: active
-        ACTIVE_FLAG WITH TAG (DATA.TYPE='FLAG'),
-        TIMESTAMP_COL TIMESTAMP_NTZ(9),
-        -- Dummy Samples: {"status": "new"}
-        JSON_DATA VARIANT,
-        REGULAR_COLUMN VARCHAR(100),
-        primary key (ID)
-    );"""
-
-    test_cases = [test_case_1, test_case_2]
-    
-    for i, test_case in enumerate(test_cases, 1):
-        print(f"\nTesting Case {i}:")
-        print("=" * 80)
-        print("Original DDL:")
-        print(test_case)
-        print("\nSplit into batches:")
-        try:
-            batches = split_ddl_into_batches(test_case)
-            for j, batch in enumerate(batches, 1):
-                print(f"\nBatch {j}:")
-                print(batch)
-                print("-" * 80)
-        except Exception as e:
-            print(f"Error processing test case {i}: {str(e)}")
+    # Test with tags included
+    print("\nTesting with tags included:")
+    print("=" * 80)
+    try:
+        batches = split_ddl_into_batches(test_ddl, include_tags=True)
+        for i, batch in enumerate(batches, 1):
+            print(f"\nBatch {i}:")
+            print(batch)
+            print("-" * 80)
+    except Exception as e:
+        print(f"Error processing with tags: {str(e)}")
+        
+    # Test with tags excluded
+    print("\nTesting with tags excluded:")
+    print("=" * 80)
+    try:
+        batches = split_ddl_into_batches(test_ddl, include_tags=False)
+        for i, batch in enumerate(batches, 1):
+            print(f"\nBatch {i}:")
+            print(batch)
+            print("-" * 80)
+    except Exception as e:
+        print(f"Error processing without tags: {str(e)}")
 
 if __name__ == "__main__":
     test_ddl_splitter()
