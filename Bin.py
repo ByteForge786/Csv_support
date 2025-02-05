@@ -19,10 +19,7 @@ def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
         batch_size (int): Number of columns per batch (default 5)
         
     Returns:
-        List[str]: List of DDL statements, each containing a batch of columns
-        
-    Raises:
-        ValueError: If DDL cannot be parsed properly
+        List[str]: List of DDL statements, each containing a batch of numbered columns
     """
     try:
         # Extract create statement and columns
@@ -35,50 +32,60 @@ def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
         create_header = match.group(1)
         columns_text = match.group(2)
         closing = match.group(3) or ');'
+
+        # Split into lines
+        lines = columns_text.split('\n')
         
-        # Pattern to match complete column definitions
-        column_pattern = r'''
-            # Optional dummy samples in comments
-            (?:(?:--[^\n]*\n)*)?
-            # Column name
-            (?:[\w\._]+)
-            # Optional datatype
-            (?:\s+(?:VARCHAR|NUMBER|TIMESTAMP_NTZ|VARIANT|TIMESTAMP|DATE)\s*(?:\([^)]+\))?)?
-            # Optional tag clause with nested parentheses
-            (?:\s+(?:WITH\s+TAG\s*\([^)]+\)))?
-            # Optional constraints
-            (?:\s+(?:NOT\s+NULL|PRIMARY\s+KEY|DEFAULT[^,]+))?
-            # Capture any remaining part until the next column or end
-            [^,]*?
-            # Look ahead for next column or end
-            (?=\s*,|\s*$)
-        '''
-        
-        # Get all column definitions with their comments
+        # Process lines to group columns with their dummy values and tags
         columns = []
-        current_comments = []
+        current_column = []
+        column_count = 0
         
-        for line in columns_text.split('\n'):
+        for line in lines:
             line = line.strip()
+            if not line:
+                continue
+                
             if line.startswith('--'):
-                current_comments.append(line)
-            elif line and not line.startswith('--'):
-                if current_comments:
-                    columns.append('\n'.join(current_comments + [line]))
-                    current_comments = []
-                else:
-                    columns.append(line)
-        
+                # Add dummy values to current column
+                current_column.append(line)
+            elif line.startswith('primary key'):
+                # Handle primary key separately
+                if current_column:
+                    columns.append('\n    '.join(current_column))
+                    current_column = []
+                columns.append(line)
+            else:
+                # If we have a previous column, add it to our list
+                if current_column:
+                    columns.append('\n    '.join(current_column))
+                current_column = [line]
+                
+        # Add the last column if exists
+        if current_column:
+            columns.append('\n    '.join(current_column))
+            
         # Clean up columns
         columns = [col.strip().rstrip(',') for col in columns if col.strip()]
         
-        # Group into batches
+        # Group into batches with column numbering
         batches = []
         for i in range(0, len(columns), batch_size):
             batch_columns = columns[i:i + batch_size]
             
+            # Number and format columns
+            numbered_columns = []
+            for j, col in enumerate(batch_columns, i + 1):
+                if col.startswith('primary key'):
+                    numbered_columns.append(col)
+                else:
+                    # Add column number at the start
+                    col_lines = col.split('\n')
+                    col_lines.insert(0, f"-- Column {j}")
+                    numbered_columns.append('\n    '.join(col_lines))
+            
             # Add commas between columns
-            formatted_columns = ',\n    '.join(batch_columns)
+            formatted_columns = ',\n    '.join(numbered_columns)
             
             # Create complete DDL for this batch
             batch_ddl = f"{create_header}\n    {formatted_columns}\n{closing}"
@@ -93,59 +100,50 @@ def split_ddl_into_batches(ddl: str, batch_size: int = 5) -> List[str]:
 def test_ddl_splitter():
     """Test the DDL splitter with various cases"""
     
-    # Test case 1: Simple CREATE TABLE
+    # Test case 1: Hybrid mix of column formats
     test_case_1 = """
-    create or replace table KSMM_MASTER_20250128 (
-        SK_KSMM_LEVEL_ID NUMBER(38,0) NOT NULL,
-        KSMM_LEVEL_NAME VARCHAR(100),
-        KSMM_LEVEL_NUMBER NUMBER(38,0),
-        KSMM_LEVEL_DESC VARCHAR(1000),
-        SRCUPDATEDTS TIMESTAMP_NTZ(9),
-        AUDITCREATEDTS TIMESTAMP_NTZ(9),
-        AUDITUPDATEDTS TIMESTAMP_NTZ(9),
-        CREATE_USER VARCHAR(100),
-        UPDATE_USER VARCHAR(100),
-        UPDATE_TS TIMESTAMP_NTZ(9),
-        CREATE_TS TIMESTAMP_NTZ(9),
-        primary key (SK_KSMM_LEVEL_ID)
-    );"""
-    
-    # Test case 2: CREATE VIEW with tags and dummy samples
-    test_case_2 = """
-    create or replace view RMEP_NHANCE_EXCEPTION_VIEW(
-        EXCEPTION_ID,
-        -- Dummy Sample: post_trade_rmep|8000060|GLOBAL
-        COBDATE WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19', NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_SENSITIVITY='CI'),
-        -- Dummy Samples: 2024-11-27, 2024-12-19, 2024-12-35
-        AGE WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
-        -- Dummy Samples: 2, 8, 2
-        SK_OWNER_ID,
-        -- Dummy Samples: 1352, 1352, 1352
-        ASSIGNEDTO WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
-        -- Dummy Samples: pupakos, quinnelk, shelorak
-        CATEGORY WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
-        -- Dummy Samples: Non Genuine, Non Genuine, To be Investigated
-        CLOSURECOB WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19')
-    );"""
-    
-    # Test case 3: CREATE TABLE with JSON dummy samples
-    test_case_3 = """
-    create or replace TABLE EXCEPTION_ATTRIBUTE_BKP20241223 (
-        EXCEPTION_ID VARCHAR(5000),
-        -- Dummy Sample: TRADEACCOUNT_COUNTERPARTY_INTE
-        DATAVALUE VARIANT,
+    create or replace view HYBRID_TEST_VIEW(
+        SIMPLE_COLUMN,
+        TYPED_COLUMN VARCHAR(100),
+        -- Dummy Samples: value1, value2, value3
+        COLUMN_WITH_DUMMY,
+        COLUMN_WITH_TAG WITH TAG (REFERENCE.DATA='19'),
+        -- Dummy Samples: 2024-01-01, 2024-01-02
+        TYPED_WITH_TAG_AND_DUMMY NUMBER(38,0) WITH TAG (REFERENCE.DATA='20'),
+        NULLABLE_COLUMN VARCHAR(50),
         -- Dummy Sample: {
-        -- "CobDate": "2024-07-04",
+        -- "key": "value"
         -- }
-        COBDATE VARCHAR(5000),
-        -- Dummy Samples: 2024-07-04, 2024-07-04, 2024-07-04
-        SK_OWNER_ID NUMBER(38,0),
-        -- Dummy Samples: 12, 12, 12
-        CREATE_TS TIMESTAMP_NTZ(9)
-        -- Dummy Samples: 2024-07-05 17:55:49.395000, 2024-07-05 17:55:49.395000
+        JSON_DUMMY_COLUMN,
+        NOT_NULL_COLUMN NUMBER(10) NOT NULL,
+        -- Dummy Samples: 1, 2, 3
+        SIMPLE_WITH_DUMMY,
+        TAG_ONLY WITH TAG (COMPLEX.TAG='value', OTHER.TAG='test'),
+        primary key (SIMPLE_COLUMN)
     );"""
     
-    test_cases = [test_case_1, test_case_2, test_case_3]
+    # Test case 2: CREATE TABLE with mixed formats
+    test_case_2 = """
+    create or replace TABLE MIXED_FORMAT_TABLE (
+        ID NUMBER(38,0) NOT NULL,
+        -- Dummy Sample: SAMPLE_VALUE
+        NAME VARCHAR(200),
+        -- Dummy Samples: 2024-07-04, 2024-07-05
+        DATE_COLUMN DATE WITH TAG (DATA.SENSITIVITY='HIGH'),
+        SIMPLE_COL,
+        -- Dummy Samples: 100.5, 200.5
+        AMOUNT NUMBER(10,2),
+        STATUS VARCHAR(50) WITH TAG (DATA.TYPE='STATUS'),
+        -- Dummy Sample: active
+        ACTIVE_FLAG WITH TAG (DATA.TYPE='FLAG'),
+        TIMESTAMP_COL TIMESTAMP_NTZ(9),
+        -- Dummy Samples: {"status": "new"}
+        JSON_DATA VARIANT,
+        REGULAR_COLUMN VARCHAR(100),
+        primary key (ID)
+    );"""
+
+    test_cases = [test_case_1, test_case_2]
     
     for i, test_case in enumerate(test_cases, 1):
         print(f"\nTesting Case {i}:")
