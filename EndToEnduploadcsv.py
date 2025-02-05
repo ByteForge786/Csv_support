@@ -325,7 +325,9 @@ def handle_csv_upload():
         st.session_state.csv_processed = False
         st.session_state.analysis_complete = False
         st.session_state.analysis_df = None
-        
+    
+    # Add analyze button
+    if uploaded_file is not None and st.button("🔍 Analyze Structure"):
         try:
             df = pd.read_csv(uploaded_file)
             
@@ -333,50 +335,66 @@ def handle_csv_upload():
                 st.error("CSV must contain 'attribute_name' column")
                 return
                 
-            # Batch process descriptions
-            attributes = df['attribute_name'].tolist()
-            batch_prompt = f"""For each column name below, provide a clear, concise explanation of what it represents in a database context.
-            Format the response as a JSON with column names as keys and explanations as values.
+            # Convert all attributes to strings and clean them
+            attributes = [str(attr).strip() for attr in df['attribute_name'].tolist()]
+            attributes = [attr for attr in attributes if attr]
             
-            Column names:
-            {', '.join(attributes)}"""
+            # Initialize results container
+            all_results = []
+            BATCH_SIZE = 30
             
-            # Get batch descriptions
-            descriptions_json = get_llm_response(batch_prompt)
-            analysis = eval(descriptions_json)
+            # Process in batches of 30
+            for i in range(0, len(attributes), BATCH_SIZE):
+                batch = attributes[i:i + BATCH_SIZE]
+                
+                # Create prompt for current batch
+                batch_prompt = f"""For each column name below, provide a clear, concise explanation of what it represents in a database context.
+                Format the response as a JSON with column names as keys and explanations as values.
+                
+                Column names:
+                {', '.join(batch)}"""
+                
+                # Get batch descriptions
+                with st.spinner(f'Processing columns {i+1}-{min(i+BATCH_SIZE, len(attributes))} of {len(attributes)}...'):
+                    descriptions_json = get_llm_response(batch_prompt)
+                    batch_analysis = eval(descriptions_json)
+                    
+                    # Create classification prompts for this batch
+                    batch_classification_prompts = [
+                        create_classification_prompt(col, explanation) 
+                        for col, explanation in batch_analysis.items()
+                    ]
+                    
+                    # Get sensitivity predictions for this batch
+                    batch_predictions = classify_sensitivity(batch_classification_prompts)
+                    
+                    # Transform predictions
+                    batch_transformed = [
+                        "Confidential Information" if pred == "Non-person data" else pred 
+                        for pred in batch_predictions
+                    ]
+                    
+                    # Add batch results
+                    batch_results = [
+                        {
+                            "Column Name": col,
+                            "Explanation": explanation,
+                            "Data Sensitivity": sensitivity
+                        }
+                        for (col, explanation), sensitivity in zip(batch_analysis.items(), batch_transformed)
+                    ]
+                    all_results.extend(batch_results)
             
-            # Create classification prompts
-            classification_prompts = [
-                create_classification_prompt(col, explanation) 
-                for col, explanation in analysis.items()
-            ]
-            
-            # Get sensitivity predictions using existing pipeline
-            sensitivity_predictions = classify_sensitivity(classification_prompts)
-            
-            # Transform predictions
-            transformed_predictions = [
-                "Confidential Information" if pred == "Non-person data" else pred 
-                for pred in sensitivity_predictions
-            ]
-            
-            # Prepare results data
-            results_data = [
-                {
-                    "Column Name": col,
-                    "Explanation": explanation,
-                    "Data Sensitivity": sensitivity
-                }
-                for (col, explanation), sensitivity in zip(analysis.items(), transformed_predictions)
-            ]
-            
-            st.session_state.analysis_df = pd.DataFrame(results_data)
+            # Create final dataframe with all results
+            st.session_state.analysis_df = pd.DataFrame(all_results)
             st.session_state.analysis_complete = True
             st.session_state.csv_processed = True
             
         except Exception as e:
             st.error(f"Error processing CSV: {str(e)}")
             logger.error(f"CSV processing error: {str(e)}")
+            
+    
 
 def main():
     st.set_page_config(page_title="DDL Analyzer", page_icon="🔍", layout="wide")
