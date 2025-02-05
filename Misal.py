@@ -1,3 +1,58 @@
+def generate_alter_statements(schema, object_name, feedback_df):
+    """Generate ALTER statements from feedback data using abbreviated codes"""
+    # Mapping for sensitivity codes
+    sensitivity_codes = {
+        "Sensitive PII": "PII",
+        "Non-sensitive PII": "NSPII", 
+        "Confidential Information": "CIF",
+        "Licensed Data": "LD"
+    }
+    
+    alter_statements = []
+    for _, row in feedback_df.iterrows():
+        # Get the abbreviated code for the sensitivity
+        sensitivity_code = sensitivity_codes[row['Data Sensitivity']]
+        
+        alter_stmt = (f"ALTER TABLE {schema}.{object_name} MODIFY COLUMN {row['Column Name']} "
+                     f"SET TAG DATA_SENSITIVITY = '{sensitivity_code}';")
+        alter_statements.append(alter_stmt)
+    return alter_statements
+
+
+
+if st.button("▶️ Execute", key="execute_button"):
+    st.session_state.analysis_df = edited_df.copy()
+    
+    # Save feedback
+    save_feedback(
+        st.session_state.current_schema,
+        st.session_state.current_object,
+        st.session_state.analysis_df
+    )
+    
+    # Generate and execute ALTER statements
+    alter_statements = generate_alter_statements(
+        st.session_state.current_schema,
+        st.session_state.current_object,
+        st.session_state.analysis_df
+    )
+    
+    # Execute using your existing Snowflake connection
+    try:
+        for stmt in alter_statements:
+            execute_snowflake_query(stmt)
+        st.success("✅ Feedback saved and tags updated in Snowflake!")
+        st.balloons()
+    except Exception as e:
+        st.error(f"Error updating Snowflake tags: {str(e)}")
+        logger.error(f"Snowflake update error: {str(e)}")
+
+
+
+
+
+
+
 def main():
     st.set_page_config(page_title="DDL Analyzer", page_icon="🔍", layout="wide")
     apply_custom_css()
