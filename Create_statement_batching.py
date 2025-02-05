@@ -1,3 +1,97 @@
+def format_ddl_batches(parsed_ddl: Dict, batch_size: int = 30) -> List[str]:
+    """
+    Format parsed DDL into batches with CREATE statement headers
+    
+    Args:
+        parsed_ddl (Dict): Parsed DDL information
+        batch_size (int): Number of columns per batch
+        
+    Returns:
+        List[str]: List of DDL batches with headers
+    """
+    obj_type = parsed_ddl['type']
+    obj_name = parsed_ddl['name']
+    columns = parsed_ddl['columns']
+    
+    # Create header
+    header = f"create or replace {obj_type} {obj_name}"
+    
+    # Split columns into batches
+    batches = []
+    for i in range(0, len(columns), batch_size):
+        batch_columns = columns[i:i + batch_size]
+        
+        # Format column definitions
+        column_defs = []
+        for col in batch_columns:
+            col_def = col['name']
+            if col.get('datatype'):
+                col_def += f" {col['datatype']}"
+            if col.get('samples'):
+                samples = col['samples']
+                if isinstance(samples, list):
+                    col_def += f"\n    -- Dummy Samples: {', '.join(samples)}"
+                else:
+                    col_def += f"\n    -- Dummy Sample: {samples}"
+            column_defs.append(col_def)
+        
+        # Create batch DDL
+        batch_ddl = f"{header}(\n    " + ",\n    ".join(column_defs) + "\n)"
+        batches.append(batch_ddl)
+    
+    return batches
+
+# Modify main() to use the new format
+def main():
+    parser = DDLParser()
+    
+    ddl = """
+    create or replace view RMEP_NHANCE_EXCEPTION_VIEW(
+        EXCEPTION_ID,
+        -- Dummy Sample: post_trade_rmep|8000060|GLOBAL
+        COBDATE WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19', NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_SENSITIVITY='CI'),
+        -- Dummy Samples: 2024-11-27, 2024-12-19, 2024-12-31
+        AGE WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
+        -- Dummy Samples: 2, 8, 2
+        SK_OWNER_ID,
+        -- Dummy Samples: 1352, 1352, 1352
+        ASSIGNEDTO WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
+        -- Dummy Samples: aupakos, quinnelk, shelorak
+        CATEGORY WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19'),
+        -- Dummy Samples: Non Genuine, Non Genuine, To be Investigated
+        CLOSURECOB WITH TAG (NUCLEUS_METAHUB.GOVERNANCE_STATIC_REFERENCES.DATA_CONCEPT='19')
+    )
+    """
+    
+    try:
+        # Parse with tags
+        print("\nDDL Batches with tags:")
+        print("-" * 80)
+        result_with_tags = parser.parse_ddl(ddl, include_tags=True)
+        batches_with_tags = format_ddl_batches(result_with_tags, batch_size=3)
+        for i, batch in enumerate(batches_with_tags, 1):
+            print(f"\nBatch {i}:")
+            print(batch)
+            print("-" * 80)
+        
+        # Parse without tags
+        print("\nDDL Batches without tags:")
+        print("-" * 80)
+        result_without_tags = parser.parse_ddl(ddl, include_tags=False)
+        batches_without_tags = format_ddl_batches(result_without_tags, batch_size=3)
+        for i, batch in enumerate(batches_without_tags, 1):
+            print(f"\nBatch {i}:")
+            print(batch)
+            print("-" * 80)
+        
+    except Exception as e:
+        print(f"Error parsing DDL: {str(e)}")
+
+if __name__ == "__main__":
+    main()
+
+
+#=============working cide below==========
 import re
 import json
 from typing import List, Dict, Union, Optional
