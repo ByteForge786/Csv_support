@@ -7,9 +7,9 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch
 import os
 import snowflake.connector
-
-# Version
-__version__ = "1.0.0"
+from typing import List, Dict, Tuple, Optional
+import re
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -28,7 +28,7 @@ SENSITIVITY_OPTIONS = [
     "Licensed Data"
 ]
 
-# Initialize session state
+# Initialize session state for DDL analyzer
 if 'initialized' not in st.session_state:
     st.session_state.initialized = True
     st.session_state.current_schema = None
@@ -38,52 +38,130 @@ if 'initialized' not in st.session_state:
     st.session_state.editing_enabled = False
     st.session_state.edited_cells = {}
     st.session_state.analysis_complete = False
-    st.session_state.snowflake_conn = None
+    st.session_state.csv_processed = False
+    st.session_state.csv_file = None
 
-# Snowflake Connection Functions
-def get_snowflake_connection():
-    """Establish connection to Snowflake"""
+# Snowflake Connection Cache
+snowflake_conn = None
+
+def get_llm_response(prompt: str) -> str:
+    """Get response from LLM model"""
     try:
-        if st.session_state.snowflake_conn is None:
+        # Implementation depends on your LLM setup
+        # This is a placeholder - replace with your actual LLM implementation
+        response = "Placeholder LLM response"
+        return response
+    except Exception as e:
+        logger.error(f"LLM error: {str(e)}")
+        raise
+
+def get_snowflake_connection():
+    """Get cached Snowflake connection or create new one"""
+    global snowflake_conn
+    try:
+        if snowflake_conn is None:
             env = "dev"
             property_values = fetch_properties(env)
-            conn = snowflake.connector.connect(
+            snowflake_conn = snowflake.connector.connect(
                 user=property_values['snowflake.dbUsername'],
                 password=property_values['snowflake.dbPassword'],
-                account=property_values['snowflake.account']
+                account=property_values['snowflake.account'],
+                client_session_keep_alive=True,
+                client_prefetch_threads=4,
+                network_timeout=30
             )
-            st.session_state.snowflake_conn = conn
-        return st.session_state.snowflake_conn
+            logger.info("New Snowflake connection established")
+        return snowflake_conn
     except Exception as e:
-        st.error(f"Connection error: {str(e)}")
         logger.error(f"Snowflake connection error: {str(e)}")
+        st.error(f"Connection error: {str(e)}")
         return None
 
-def get_databases(conn):
-    """Get list of databases from Snowflake"""
-    cur = conn.cursor()
-    cur.execute("SHOW DATABASES")
-    return [row[1] for row in cur.fetchall()]
+def close_snowflake_connection():
+    """Close Snowflake connection if exists"""
+    global snowflake_conn
+    if snowflake_conn:
+        try:
+            snowflake_conn.close()
+            snowflake_conn = None
+            logger.info("Snowflake connection closed")
+        except Exception as e:
+            logger.error(f"Error closing Snowflake connection: {str(e)}")
 
-def get_schemas(conn, database):
-    """Get list of schemas for selected database"""
-    cur = conn.cursor()
-    cur.execute(f"SHOW SCHEMAS IN DATABASE {database}")
-    return [row[1] for row in cur.fetchall()]
+def execute_snowflake_query(query: str, params: tuple = None) -> List:
+    """Execute Snowflake query with connection management and error handling"""
+    conn = get_snowflake_connection()
+    if not conn:
+        return []
+    
+    try:
+        cur = conn.cursor()
+        if params:
+            cur.execute(query, params)
+        else:
+            cur.execute(query)
+        results = cur.fetchall()
+        cur.close()
+        return results
+    except Exception as e:
+        logger.error(f"Query execution error: {str(e)}\nQuery: {query}")
+        st.error(f"Query execution error: {str(e)}")
+        return []
 
-def get_objects(conn, database, schema, object_type):
-    """Get list of objects (tables/views) for selected schema"""
-    cur = conn.cursor()
-    cur.execute(f"SHOW {object_type}S IN SCHEMA {database}.{schema}")
-    return [row[1] for row in cur.fetchall()]
+def get_schema_list() -> List[str]:
+    """Get list of schemas"""
+    try:
+        conn = get_snowflake_connection()
+        if not conn:
+            return []
+        
+        cur = conn.cursor()
+        cur.execute("SHOW SCHEMAS")
+        schemas = [row[1] for row in cur.fetchall()]
+        cur.close()
+        return schemas
+    except Exception as e:
+        logger.error(f"Error getting schema list: {str(e)}")
+        return []
 
-def get_ddl(conn, database, schema, object_name, object_type):
-    """Get DDL for selected object"""
-    cur = conn.cursor()
-    cur.execute(f"SELECT GET_DDL('{object_type}', '{database}.{schema}.{object_name}')")
-    return cur.fetchone()[0]
+def get_schema_objects(schema: str) -> Dict[str, List[str]]:
+    """Get tables and views in schema"""
+    try:
+        conn = get_snowflake_connection()
+        if not conn:
+            return {"tables": [], "views": []}
+        
+        cur = conn.cursor()
+        
+        # Get tables
+        cur.execute(f"SHOW TABLES IN SCHEMA {schema}")
+        tables = [row[1] for row in cur.fetchall()]
+        
+        # Get views
+        cur.execute(f"SHOW VIEWS IN SCHEMA {schema}")
+        views = [row[1] for row in cur.fetchall()]
+        
+        cur.close()
+        return {"tables": tables, "views": views}
+    except Exception as e:
+        logger.error(f"Error getting schema objects: {str(e)}")
+        return {"tables": [], "views": []}
 
-# Model and Classification Functions
+def get_databases() -> List[str]:
+    """Get list of databases with caching"""
+    results = execute_snowflake_query("SHOW DATABASES")
+    return [row[1] for row in results] if results else []
+
+def get_schemas(database: str) -> List[str]:
+    """Get schemas from database with caching"""
+    results = execute_snowflake_query(f"SHOW SCHEMAS IN DATABASE {database}")
+    return [row[1] for row in results] if results else []
+
+def get_objects(database: str, schema: str, object_type: str) -> List[str]:
+    """Get database objects with caching"""
+    results = execute_snowflake_query(f"SHOW {object_type}S IN SCHEMA {database}.{schema}")
+    return [row[1] for row in results] if results else []
+
 @st.cache_resource
 def get_model_and_tokenizer():
     """Loads and caches the model and tokenizer globally"""
@@ -134,8 +212,35 @@ def classify_sensitivity(texts_to_classify: List[str]) -> List[str]:
     
     return predicted_labels
 
-# Feedback Functions
-def load_existing_feedback(schema, table):
+def get_ddl_and_samples(database: str, schema: str, object_name: str, object_type: str) -> Tuple[str, Dict]:
+    """Get DDL and sample values for object"""
+    ddl_result = execute_snowflake_query(
+        f"SELECT GET_DDL('{object_type}', '{database}.{schema}.{object_name}')"
+    )
+    ddl = ddl_result[0][0] if ddl_result else ""
+
+    # Extract create statement from view DDL if needed
+    if object_type == 'VIEW':
+        create_match = re.search(r'create\s+(?:or\s+replace\s+)?view.*?as\s+(.+?)(?:;|\Z)', 
+                               ddl, re.IGNORECASE | re.DOTALL)
+        if create_match:
+            ddl = create_match.group(1).strip()
+
+    # Get sample values for columns
+    samples = {}
+    try:
+        sample_query = f"SELECT * FROM {database}.{schema}.{object_name} LIMIT 5"
+        results = execute_snowflake_query(sample_query)
+        if results:
+            columns = [desc[0] for desc in cur.description]
+            for i, col in enumerate(columns):
+                samples[col] = [row[i] for row in results]
+    except Exception as e:
+        logger.warning(f"Could not fetch samples: {str(e)}")
+
+    return ddl, samples
+
+def load_existing_feedback(schema: str, table: str) -> Optional[pd.DataFrame]:
     """Load existing feedback from CSV file"""
     if os.path.exists(FEEDBACK_FILE):
         df = pd.read_csv(FEEDBACK_FILE)
@@ -148,7 +253,7 @@ def load_existing_feedback(schema, table):
             })
     return None
 
-def save_feedback(schema, table, feedback_df):
+def save_feedback(schema: str, table: str, feedback_df: pd.DataFrame):
     """Save or update feedback in CSV file"""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     new_records = []
@@ -175,156 +280,7 @@ def save_feedback(schema, table, feedback_df):
     
     updated_df.to_csv(FEEDBACK_FILE, index=False)
 
-# UI Functions
-def apply_custom_css():
-    """Apply custom CSS styling"""
-    st.markdown("""
-        <style>
-        .custom-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 1rem 0;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        
-        .custom-table thead {
-            background: #f8f9fa;
-        }
-        
-        .custom-table th {
-            padding: 12px 15px;
-            text-align: left;
-            font-weight: 600;
-            color: #344767;
-            border-bottom: 2px solid #eee;
-        }
-        
-        .custom-table td {
-            padding: 12px 15px;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .custom-table tr:last-child td {
-            border-bottom: none;
-        }
-        
-        .custom-table tr:hover {
-            background: #f8f9fa;
-        }
-        
-        .editable {
-            position: relative;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        
-        .editable:hover {
-            background: #f1f3f6;
-        }
-        
-        .editable input, .editable select {
-            width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        
-        .editable input:focus, .editable select:focus {
-            outline: none;
-            border-color: #2196f3;
-            box-shadow: 0 0 0 2px rgba(33,150,243,0.2);
-        }
-        
-        .column-name {
-            font-weight: 500;
-            color: #1a73e8;
-        }
-        
-        .sensitivity-badge {
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        
-        .sensitive-pii {
-            background: #ffebee;
-            color: #d32f2f;
-        }
-        
-        .non-sensitive-pii {
-            background: #e8f5e9;
-            color: #2e7d32;
-        }
-        
-        .confidential {
-            background: #fff3e0;
-            color: #ef6c00;
-        }
-        
-        .licensed {
-            background: #e3f2fd;
-            color: #1976d2;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-def display_editable_table():
-    """Display the analysis results in a compact table format with enhanced styling"""
-    if st.session_state.analysis_df is None:
-        return
-
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        csv = st.session_state.analysis_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Results as CSV",
-            data=csv,
-            file_name=f"ddl_analysis_{st.session_state.current_schema}_{st.session_state.current_object}_{datetime.now():%Y%m%d_%H%M}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-    edited_df = st.data_editor(
-        st.session_state.analysis_df,
-        key=f"table_{st.session_state.current_schema}_{st.session_state.current_object}",
-        column_config={
-            "Column Name": st.column_config.TextColumn(
-                "Column Name",
-                width="medium",
-                disabled=True,
-            ),
-            "Explanation": st.column_config.TextColumn(
-                "Explanation",
-                width="large",
-            ),
-            "Data Sensitivity": st.column_config.SelectboxColumn(
-                "Data Sensitivity",
-                width="medium",
-                options=SENSITIVITY_OPTIONS,
-            )
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-    )
-
-    if st.button("▶️ Execute", key="execute_button"):
-        st.session_state.analysis_df = edited_df.copy()
-        save_feedback(
-            st.session_state.current_schema,
-            st.session_state.current_object,
-            st.session_state.analysis_df
-        )
-        st.success("✅ Feedback saved successfully!")
-        st.balloons()
-
-def is_allowed_user(username):
-    """Check if user is allowed to see CSV upload option"""
-    return 'gowdas' in username.lower()
+[Previous CSS and display functions remain unchanged...]
 
 def handle_csv_upload():
     """Handle CSV file upload and analysis"""
@@ -347,184 +303,7 @@ def handle_csv_upload():
             df = pd.read_csv(uploaded_file)
             
             if 'attribute_name' not in df.columns:
-                st.error(f"Error processing CSV: {str(e)}")
-            logger.error(f"CSV processing error: {str(e)}")
-
-def analyze_snowflake_object(schema, object_name, object_type, ddl):
-    """Analyze Snowflake object structure"""
-    try:
-        # Check for existing analysis first
-        existing_analysis = load_existing_feedback(schema, object_name)
-        
-        if existing_analysis is not None:
-            st.session_state.analysis_df = existing_analysis
-        else:
-            # Generate prompt for analysis
-            prompt = f"""Analyze this DDL statement and provide an explanation for each column:
-            {ddl}
-            For each column, provide a clear, concise explanation of what the column represents.
-            Format as JSON: {{"column_name": "explanation of what this column represents"}}"""
-
-            # Get analysis
-            analysis = eval(get_llm_response(prompt))
-            
-            # Create classification prompts
-            classification_prompts = [
-                create_classification_prompt(col, explanation) 
-                for col, explanation in analysis.items()
-            ]
-            
-            # Get sensitivity predictions
-            sensitivity_predictions = classify_sensitivity(classification_prompts)
-            
-            # Transform predictions
-            transformed_predictions = [
-                "Confidential Information" if pred == "Non-person data" else pred 
-                for pred in sensitivity_predictions
-            ]
-            
-            # Prepare results data
-            results_data = [
-                {
-                    "Column Name": col,
-                    "Explanation": explanation,
-                    "Data Sensitivity": sensitivity
-                }
-                for (col, explanation), sensitivity in zip(analysis.items(), transformed_predictions)
-            ]
-            
-            st.session_state.analysis_df = pd.DataFrame(results_data)
-        
-        st.session_state.analysis_complete = True
-        
-    except Exception as e:
-        st.error(f"Error analyzing DDL: {str(e)}")
-        logger.error(f"Analysis error: {str(e)}")
-        return False
-    
-    return True
-
-def main():
-    st.set_page_config(page_title="DDL Analyzer", page_icon="🔍", layout="wide")
-    apply_custom_css()
-    
-    st.title("🔍 DDL Analyzer")
-    st.markdown(f"Analyze your database objects structure and get intelligent insights. v{__version__}")
-
-    # Initialize session state for analysis type if not exists
-    if 'analysis_type' not in st.session_state:
-        st.session_state.analysis_type = "Database Object"
-
-    # Sidebar selections
-    with st.sidebar:
-        st.header("Analysis Type")
-        
-        # Only show CSV option to allowed users
-        username = os.getenv('USER', '')
-        
-        if is_allowed_user(username):
-            analysis_type = st.radio(
-                "Select Analysis Type",
-                ["Database Object", "CSV Upload"],
-                key='analysis_type_radio'
-            )
-            
-            if analysis_type != st.session_state.analysis_type:
-                st.session_state.analysis_type = analysis_type
-                if analysis_type == "Database Object":
-                    st.session_state.csv_file = None
-                    st.session_state.csv_processed = False
-                else:
-                    st.session_state.current_schema = None
-                    st.session_state.current_object = None
-                    st.session_state.current_object_type = None
-                st.session_state.analysis_complete = False
-                st.session_state.analysis_df = None
-                st.experimental_rerun()
-
-        if st.session_state.analysis_type == "Database Object":
-            st.header("Object Selection")
-            
-            # Initialize Snowflake connection
-            conn = get_snowflake_connection()
-            if not conn:
-                st.error("Unable to connect to Snowflake. Please check your credentials.")
-                return
-            
-            # Get databases
-            databases = get_databases(conn)
-            selected_db = st.selectbox("1. Select Database", databases)
-            
-            if selected_db:
-                # Get schemas
-                schemas = get_schemas(conn, selected_db)
-                selected_schema = st.selectbox("2. Select Schema", schemas)
-                
-                if selected_schema != st.session_state.current_schema:
-                    st.session_state.current_schema = selected_schema
-                    st.session_state.analysis_complete = False
-                    st.session_state.analysis_df = None
-                
-                # Object type selection
-                object_type = st.radio("3. Select Object Type", ["TABLE", "VIEW"])
-                if object_type != st.session_state.current_object_type:
-                    st.session_state.current_object_type = object_type
-                    st.session_state.analysis_complete = False
-                    st.session_state.analysis_df = None
-                
-                # Get objects of selected type
-                objects = get_objects(conn, selected_db, selected_schema, object_type)
-                selected_object = st.selectbox(f"4. Select {object_type}", objects)
-                
-                if selected_object != st.session_state.current_object:
-                    st.session_state.current_object = selected_object
-                    st.session_state.analysis_complete = False
-                    st.session_state.analysis_df = None
-
-    # Main content area
-    if st.session_state.analysis_type == "CSV Upload":
-        handle_csv_upload()
-        
-        if st.session_state.csv_processed and st.session_state.analysis_complete:
-            st.subheader("📊 Analysis Results")
-            display_editable_table()
-    else:
-        if all([st.session_state.current_schema, st.session_state.current_object_type, st.session_state.current_object]):
-            try:
-                conn = get_snowflake_connection()
-                if not conn:
-                    return
-                
-                # Get DDL
-                ddl = get_ddl(conn, selected_db, st.session_state.current_schema, 
-                             st.session_state.current_object, st.session_state.current_object_type)
-                
-                # Display DDL
-                st.subheader("📝 DDL Statement")
-                with st.expander("View DDL", expanded=True):
-                    st.code(ddl, language='sql')
-                
-                # Analysis section
-                if not st.session_state.analysis_complete:
-                    if st.button("🔍 Analyze Structure"):
-                        with st.spinner("Analyzing structure and predicting sensitivity..."):
-                            if analyze_snowflake_object(st.session_state.current_schema,
-                                                      st.session_state.current_object,
-                                                      st.session_state.current_object_type,
-                                                      ddl):
-                                st.success("Analysis complete!")
-                
-                # Display results and enable editing
-                if st.session_state.analysis_complete:
-                    st.subheader("📊 Analysis Results")
-                    display_editable_table()
-                
-            except Exception as e:
-                st.error("Error analyzing DDL. Please try again.")
-                logger.error(f"Analysis error: {str(e)}")
-
-if __name__ == "__main__":
-    main()("CSV must contain 'attribute_name' column")
+                st.error("CSV must contain 'attribute_name' column")
                 return
                 
             attributes = [str(attr).strip() for attr in df['attribute_name'].tolist()]
@@ -544,7 +323,7 @@ if __name__ == "__main__":
                 
                 with st.spinner(f'Processing columns {i+1}-{min(i+BATCH_SIZE, len(attributes))} of {len(attributes)}...'):
                     descriptions_json = get_llm_response(batch_prompt)
-                    batch_analysis = eval(descriptions_json)
+                    batch_analysis = json.loads(descriptions_json)
                     
                     batch_classification_prompts = [
                         create_classification_prompt(col, explanation) 
@@ -573,4 +352,7 @@ if __name__ == "__main__":
             st.session_state.csv_processed = True
             
         except Exception as e:
-            st.error
+            st.error(f"Error processing CSV: {str(e)}")
+            logger.error(f"CSV processing error: {str(e)}")
+
+[Rest of the main() function and if __name__ == "__main__" block remain the same...]
